@@ -1,34 +1,31 @@
 from mcp.server.fastmcp import FastMCP
 from typing import List, Union
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
-from mcp import ClientSession, StdioServerParameters
-from mcp.client.stdio import stdio_client
-import asyncio
+import os
 from pathlib import Path
-from server.vector_store import VectorStore
+from langchain_openai import AzureChatOpenAI
 
-mcp = FastMCP(
-    name="summarizer_qna_server"
-)
+import os
+from dotenv import load_dotenv
 
-def get_api_key():
-    env_path = Path(__file__).parent.parent / '.env'
-    if env_path.exists():
-        with open(env_path) as f:
-            for line in f:
-                if line.startswith('OPENAI_API_KEY='):
-                    return line.strip().split('=')[1]
-    return None
+# Load environment variables from .env file
+load_dotenv()
 
-def run_async(coro):
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        loop = None
-    if loop and loop.is_running():
-        return loop.run_until_complete(coro)
-    else:
-        return asyncio.run(coro)
+# Fix: Import VectorStore correctly
+try:
+    from vector_store import VectorStore
+except ImportError:
+    # If import fails, create a dummy class
+    class VectorStore:
+        def query_similar(self, doc_id, embedding, top_k):
+            return ["No vector store available"]
+
+mcp = FastMCP(name="summarizer_qna_server")
+
+
+
+
+          
 
 @mcp.tool()
 def summarize_text(text: Union[str, List[str]]) -> str:
@@ -39,54 +36,83 @@ def summarize_text(text: Union[str, List[str]]) -> str:
     Returns:
         A summary string.
     """
-    if isinstance(text, dict) and 'text' in text:
-        text = text['text']
-    api_key = get_api_key()
-    if not api_key:
-        raise ValueError("Could not find OPENAI_API_KEY in .env file")
-    llm = ChatOpenAI(model="gpt-4-turbo-preview", api_key=api_key)
-    if isinstance(text, list):
-        text = "\n".join(text)
-    prompt = f"Summarize the following document or text chunks as concisely as possible:\n\n{text}"
-    return llm.invoke(prompt)
+    try:
+        if isinstance(text, dict) and 'text' in text:
+            text = text['text']
+        
+        llm = AzureChatOpenAI(
+        azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT"),
+        azure_deployment=os.getenv("AZURE_OPENAI_DEPLOYMENT"),
+        api_key=os.getenv("AZURE_OPENAI_API_KEY"),
+        api_version=os.getenv("AZURE_OPENAI_API_VERSION"),
+        temperature=0.7,
+        streaming=True,
+        model_kwargs={"stream_options": {"include_usage": True}}
+    )
 
+        
+
+        
+        if isinstance(text, list):
+            text = "\n".join(text)
+        
+        prompt = f"Summarize the following document or text chunks as concisely as possible:\n\n{text}"
+        response = llm.invoke(prompt)
+        
+        # Fix: Handle response properly
+        if hasattr(response, 'content'):
+            return response.content
+        else:
+            return str(response)
+            
+    except Exception as e:
+        return f"Error summarizing text: {str(e)}"
+
+# Initialize vector store
 vector_store = VectorStore()
 
 @mcp.tool()
-def answer_question(question: str, doc_id: str, top_k: int = 5) -> str:
+def answer_question(doc_id: str, question: str, context: str) -> str:
     """
-    Answers a user question using Retrieval-Augmented Generation (RAG):
-    1. Embeds the question
-    2. Retrieves relevant chunks from the vector store (direct call)
-    3. Uses an LLM to answer based on the retrieved context
+    Answers a user question based on provided context.
     Args:
-        question: The user's question
-        doc_id: The document ID to search within
-        top_k: Number of relevant chunks to retrieve
+        doc_id: The document ID
+        question: The user's question  
+        context: Context from retrieved chunks
     Returns:
         The answer string
     """
-    api_key = get_api_key()
-    if not api_key:
-        raise ValueError("Could not find OPENAI_API_KEY in .env file")
+    try:
+        if not api_key:
+            return "Error: Could not find AZURE_OPENAI_API_KEY"
 
-    # 1. Embed the question
-    embedder = OpenAIEmbeddings(api_key=api_key)
-    question_embedding = embedder.embed_query(question)
+        # Use LLM to answer based on provided context
+        llm = ChatOpenAI(model="gpt-4o-mini", api_key=api_key)
+        prompt = f"""Answer the following question based on the provided context from document '{doc_id}'.
 
-    # 2. Retrieve relevant chunks from the vector store (direct call)
-    chunks = vector_store.query_similar(doc_id, question_embedding, top_k)
-    context = "\n".join(chunks)
+Context:
+{context}
 
-    # 3. Use LLM to answer based on context
-    llm = ChatOpenAI(model="gpt-4-turbo-preview", api_key=api_key)
-    prompt = f"Answer the following question based on the provided context.\n\nContext:\n{context}\n\nQuestion: {question}\n\nAnswer:"
-    return llm.invoke(prompt)
+Question: {question}
 
-@mcp.resource("summarizer_qna://status")
-def summarizer_qna_status_resource() -> str:
-    """Get status of summarizer and QnA services"""
-    return "Summarization and QnA services are active"
+Answer:"""
+        
+        response = llm.invoke(prompt)
+        
+        # Fix: Handle response properly  
+        if hasattr(response, 'content'):
+            return response.content
+        else:
+            return str(response)
+            
+    except Exception as e:
+        return f"Error answering question: {str(e)}"
+
+# @mcp.resource("summarizer_qna://status")
+# def summarizer_qna_status_resource() -> str:
+#     """Get status of summarizer and QnA services"""
+#     return "Summarization and QnA services are active"
 
 if __name__ == "__main__":
+    print("[DEBUG] Starting summarizer QnA server...")
     mcp.run(transport="stdio")

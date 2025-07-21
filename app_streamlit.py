@@ -14,8 +14,9 @@ st.set_page_config(page_title="PDF QnA & Summarizer (MCP-powered)")
 st.title("PDF QnA & Summarizer (MCP-powered)")
 
 uploaded_file = st.file_uploader("Upload a PDF", type=["pdf"])
+pdf_path = None
 
-if uploaded_file:
+if uploaded_file is not None:
     # Save to a temp file
     with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
         tmp.write(uploaded_file.read())

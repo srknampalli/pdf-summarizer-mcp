@@ -23,7 +23,7 @@ class DocumentProcessingPipeline:
         doc_id = os.path.splitext(base)[0]
         doc_id = re.sub(r'[^a-zA-Z0-9._-]', '_', doc_id)
         return doc_id
-
+    # functio to call mcp sever
     async def _call_mcp_tool(self, server_script, tool_name, arguments):
         server_params = StdioServerParameters(command="python", args=[server_script])
         async with stdio_client(server_params) as (read, write):
@@ -58,7 +58,7 @@ class DocumentProcessingPipeline:
         print(f"[DEBUG] Extracted text type: {type(self.text)}, value: {str(self.text)[:200]}")
         with tracer.start_as_current_span("Chunk PDF") as span:
             self.chunks = self.run_async(self._call_mcp_tool(
-                "server/chunker.py", "chunk_text", {"text": self.text, "chunk_size": self.chunk_size, "chunk_overlap": self.chunk_overlap}
+                "server/pdf_processing_server.py", "chunk_text", {"text": self.text, "chunk_size": self.chunk_size, "chunk_overlap": self.chunk_overlap}
             ))
             span.set_attribute("num_chunks", len(self.chunks))
             span.set_attribute("first_chunk", self.chunks[0] if self.chunks else "NO CHUNKS")
@@ -88,7 +88,7 @@ class DocumentProcessingPipeline:
                 text = [t["text"] for t in text]
         with tracer.start_as_current_span("Summarize PDF") as span:
             summary = self.run_async(self._call_mcp_tool(
-                "server/summarizer.py", "summarize_text", {"text": text}
+                "server/summarizer_qna_server.py", "summarize_text", {"text": text}
             ))[0]
             span.set_attribute("summary_preview", str(summary)[:200])
         return summary
@@ -96,7 +96,7 @@ class DocumentProcessingPipeline:
     def ask_question(self, question: str, top_k: int = 15, fallback_to_llm: bool = True) -> str:
         with tracer.start_as_current_span("QnA") as span:
             q_embedding_obj = self.run_async(self._call_mcp_tool(
-                "server/embedder.py", "embed_chunks", {"text_chunks": [question]}
+                "server/pdf_processing_server.py", "embed_chunks", {"text_chunks": [question]}
             ))[0]
             print("[DEBUG] Embedder output:", q_embedding_obj)
             if hasattr(q_embedding_obj, 'embedding'):
@@ -113,7 +113,7 @@ class DocumentProcessingPipeline:
             else:
                 raise ValueError(f"Unexpected embedder output: {q_embedding_obj}")
             relevant_chunks = self.run_async(self._call_mcp_tool(
-                "server/vector_store.py", "search_embeddings", {
+                "server/pdf_processing_server.py", "search_embeddings", {
                     "doc_id": self.doc_id,
                     "query_embedding": q_embedding,
                     "top_k": top_k
@@ -132,7 +132,7 @@ class DocumentProcessingPipeline:
             span.set_attribute("doc_id", self.doc_id)
             span.set_attribute("context_preview", context[:200])
             answer = self.run_async(self._call_mcp_tool(
-                "server/qna.py", "answer_question", {
+                "server/summarizer_qna_server.py", "answer_question", {
                     "doc_id": self.doc_id,
                     "question": question,
                     "context": context
@@ -157,3 +157,4 @@ class DocumentProcessingPipeline:
             span.set_attribute("fallback_used", False)
             span.set_attribute("answer_preview", str(answer)[:200])
         return answer 
+

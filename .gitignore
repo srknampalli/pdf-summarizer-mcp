@@ -4,3 +4,16 @@ venv/
 .env
 *.pdf
 temp.*
+__pycache__/
+*.pyc
+*.log
+*.sqlite3
+uv.lock
+vector_db/
+.env
+vector_db/
+*.sqlite3
+__pycache__/
+*.pyc
+*.log
+

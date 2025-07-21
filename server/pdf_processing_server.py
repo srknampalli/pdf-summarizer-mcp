@@ -4,10 +4,18 @@ import json
 from pathlib import Path
 from langchain_openai import OpenAIEmbeddings
 
+try:
+    from vector_store import VectorStore
+except ImportError:
+    print("[WARNING] Could not import VectorStore, using dummy implementation")
+    class VectorStore:
+        def store_document(self, doc_id, chunks, vectors):
+            return f"Document '{doc_id}' stored with {len(chunks)} chunks."
+
 # Import your PDF extractor class
 # You'll need to make sure pdf_extractor.py is in the same directory
 from pdf_extractor import PDFExtractor
-from server.vector_store import VectorStore  # Add this import
+
 
 mcp = FastMCP(
     name="combined_document_processor"
@@ -18,15 +26,16 @@ extractor = PDFExtractor()
 
 vector_store = VectorStore()  # Instantiate the vector store
 
+import os
+from dotenv import load_dotenv
 def get_api_key():
-    """Get OpenAI API key from .env file"""
-    env_path = Path(__file__).parent.parent / '.env'
-    if env_path.exists():
-        with open(env_path) as f:
-            for line in f:
-                if line.startswith('OPENAI_API_KEY='):
-                    return line.strip().split('=')[1]
-    return None
+    """
+    Get Azure OpenAI API key from environment variables.
+    """
+    api_key = os.getenv("AZURE_OPENAI_API_KEY")
+    if not api_key:
+        raise ValueError("AZURE_OPENAI_API_KEY not found. Please ensure it is set in your .env file or as a system environment variable.")
+    return api_key
 
 @mcp.tool()
 def extract_pdf_contents(pdf_path: str, pages: Optional[str] = None) -> str:
@@ -38,8 +47,14 @@ def extract_pdf_contents(pdf_path: str, pages: Optional[str] = None) -> str:
     Returns:
         Extracted text as a string.
     """
-    return extractor.extract_content(pdf_path, pages)
-
+    print(f"[DEBUG] extract_pdf_contents called with: {pdf_path}")
+    try:
+        result = extractor.extract_content(pdf_path, pages)
+        print(f"[DEBUG] PDF extraction successful, length: {len(result)}")
+        return result
+    except Exception as e:
+        print(f"[ERROR] PDF extraction failed: {e}")
+        raise
 @mcp.tool()
 def chunk_text(text: str, chunk_size: int = 500) -> List[str]:
     """
@@ -64,18 +79,66 @@ def embed_chunks(text_chunks: List[str], doc_id: str = None) -> List[str]:
         List of embedding vectors as JSON strings (one per chunk), or a confirmation message if stored.
     """
     try:
-        api_key = get_api_key()
+        api_key= get_api_key()
         if not api_key:
-            raise ValueError("Could not find OPENAI_API_KEY in .env file")
+            raise ValueError("Could not find OPENAI_API_KEY")
         embedder = OpenAIEmbeddings(api_key=api_key)
         vectors = embedder.embed_documents(text_chunks)
+        
         if doc_id:
-            # Store in vector DB
-            vector_store.store_document(doc_id, text_chunks, vectors)
-            return [f"Document '{doc_id}' stored with {len(text_chunks)} chunks."]
+            # Store in vector DB using the store_embeddings function
+            store_result = store_embeddings(doc_id, text_chunks, vectors)
+            return [store_result]
+        
         return [json.dumps(vec) for vec in vectors]
     except Exception as e:
         return [f"Error: {str(e)}"]
+
+@mcp.tool()
+def search_embeddings(doc_id: str, query_embedding: List[float], top_k: int = 5) -> List[str]:
+    """
+    Search for similar text chunks using embedding similarity.
+    Args:
+        doc_id: Document identifier
+        query_embedding: Query embedding vector
+        top_k: Number of similar chunks to return
+    Returns:
+        List of most similar text chunks
+    """
+    try:
+        # Use your existing VectorStore class
+        results = vector_store.query_similar(doc_id, query_embedding, top_k)
+        return results if results else []
+    except Exception as e:
+        print(f"[ERROR] Vector search failed: {e}")
+        return [f"Error searching embeddings: {str(e)}"]
+
+@mcp.tool()
+def store_embeddings(doc_id: str, chunks: List[str], vectors: List[List[float]], metadata: dict = None) -> str:
+    """Store document chunks and their embeddings."""
+    try:
+        # Fix: Provide default metadata if None
+        if metadata is None:
+            metadata = {"source": "pdf_processing", "doc_id": doc_id}
+        
+        vector_store.store_document(doc_id, chunks, vectors, metadata)
+        return f"Document '{doc_id}' stored with {len(chunks)} chunks."
+    except Exception as e:
+        print(f"[ERROR] Vector storage failed: {e}")
+        return f"Error storing embeddings: {str(e)}"
+
+@mcp.tool()
+def list_stored_documents() -> List[str]:
+    """
+    List all documents stored in the vector database.
+    Returns:
+        List of document IDs
+    """
+    try:
+        return vector_store.list_documents()
+    except Exception as e:
+        print(f"[ERROR] Failed to list documents: {e}")
+        return [f"Error listing documents: {str(e)}"]
 
 @mcp.tool()
 def process_pdf_to_embeddings(pdf_path: str, chunk_size: int = 500, pages: Optional[str] = None) -> dict:
@@ -113,4 +176,5 @@ def pdf_status_resource() -> str:
     return "PDF extraction, chunking, and embedding services are active"
 
 if __name__ == "__main__":
+    print("[DEBUG] Starting PDF processing server...")
     mcp.run(transport="stdio")
