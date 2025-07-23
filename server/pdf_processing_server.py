@@ -3,39 +3,42 @@ from typing import List, Optional
 import json
 from pathlib import Path
 from langchain_openai import OpenAIEmbeddings
+from mcp.server.fastmcp import FastMCP
+from typing import List, Optional
+import json
+from pathlib import Path
+from langchain_openai import AzureOpenAIEmbeddings
+
+import os
+from dotenv import load_dotenv
+
+
+# env_path = Path(__file__).parent.parent / '.env'
+# load_dotenv(env_path)
+
+load_dotenv("C:/Tredence/pdf-extraction-mcp/.env")
 
 try:
     from vector_store import VectorStore
 except ImportError:
     print("[WARNING] Could not import VectorStore, using dummy implementation")
     class VectorStore:
-        def store_document(self, doc_id, chunks, vectors):
+        def store_document(self, doc_id, chunks, vectors, metadata=None):
             return f"Document '{doc_id}' stored with {len(chunks)} chunks."
+        def query_similar(self, doc_id, embedding, top_k):
+            return ["No vector store available"]
+        def list_documents(self):
+            return []
 
 # Import your PDF extractor class
-# You'll need to make sure pdf_extractor.py is in the same directory
 from pdf_extractor import PDFExtractor
 
-
-mcp = FastMCP(
-    name="combined_document_processor"
-)
+mcp = FastMCP(name="combined_document_processor")
 
 # Initialize PDF extractor
 extractor = PDFExtractor()
-
 vector_store = VectorStore()  # Instantiate the vector store
 
-import os
-from dotenv import load_dotenv
-def get_api_key():
-    """
-    Get Azure OpenAI API key from environment variables.
-    """
-    api_key = os.getenv("AZURE_OPENAI_API_KEY")
-    if not api_key:
-        raise ValueError("AZURE_OPENAI_API_KEY not found. Please ensure it is set in your .env file or as a system environment variable.")
-    return api_key
 
 @mcp.tool()
 def extract_pdf_contents(pdf_path: str, pages: Optional[str] = None) -> str:
@@ -55,6 +58,7 @@ def extract_pdf_contents(pdf_path: str, pages: Optional[str] = None) -> str:
     except Exception as e:
         print(f"[ERROR] PDF extraction failed: {e}")
         raise
+
 @mcp.tool()
 def chunk_text(text: str, chunk_size: int = 500) -> List[str]:
     """
@@ -70,7 +74,7 @@ def chunk_text(text: str, chunk_size: int = 500) -> List[str]:
 @mcp.tool()
 def embed_chunks(text_chunks: List[str], doc_id: str = None) -> List[str]:
     """
-    Generates vector embeddings for a list of text chunks using OpenAI embeddings.
+    Generates vector embeddings for a list of text chunks using Azure OpenAI embeddings.
     If doc_id is provided, also stores the embeddings and chunks in the vector DB.
     Args:
         text_chunks: List of text chunks.
@@ -79,10 +83,14 @@ def embed_chunks(text_chunks: List[str], doc_id: str = None) -> List[str]:
         List of embedding vectors as JSON strings (one per chunk), or a confirmation message if stored.
     """
     try:
-        api_key= get_api_key()
-        if not api_key:
-            raise ValueError("Could not find OPENAI_API_KEY")
-        embedder = OpenAIEmbeddings(api_key=api_key)
+        embedder = AzureOpenAIEmbeddings(
+        model="text-embedding-3-small" ,  # Example: "text-embedding-3-large"
+        deployment = "embedding-model",
+        azure_endpoint="https://llm-mlops-openai.openai.azure.com/",
+        api_key="90858d0b603c4323a2df07d8064dbcf6",
+        openai_api_version= "2024-02-01",
+    )
+
         vectors = embedder.embed_documents(text_chunks)
         
         if doc_id:
@@ -139,6 +147,8 @@ def list_stored_documents() -> List[str]:
     except Exception as e:
         print(f"[ERROR] Failed to list documents: {e}")
         return [f"Error listing documents: {str(e)}"]
+    
+
 
 @mcp.tool()
 def process_pdf_to_embeddings(pdf_path: str, chunk_size: int = 500, pages: Optional[str] = None) -> dict:
@@ -170,11 +180,10 @@ def process_pdf_to_embeddings(pdf_path: str, chunk_size: int = 500, pages: Optio
     except Exception as e:
         return {"error": str(e)}
 
-@mcp.resource("pdf://status")
-def pdf_status_resource() -> str:
-    """Get status of PDF processing capabilities"""
-    return "PDF extraction, chunking, and embedding services are active"
-
 if __name__ == "__main__":
     print("[DEBUG] Starting PDF processing server...")
+    
+    
+
+    
     mcp.run(transport="stdio")
