@@ -1,0 +1,25 @@
+{
+    "mcpServers": {
+        "pdf_processing_server": {
+            "command": "python",
+            "args": [
+                "C:\\Tredence\\pdf-extraction-mcp\\server\\pdf_processing_server.py"
+            ],
+            "transport": "stdio"
+        },
+        "summarizer_qna_server": {
+            "command": "python",
+            "args": [
+                "C:\\Tredence\\pdf-extraction-mcp\\server\\summarizer_qna_server.py"
+            ],
+            "transport": "stdio"
+        },
+        "external_tools_server": {
+            "command": "python",
+            "args": [
+                "C:\\Tredence\\pdf-extraction-mcp\\server\\external_tools_server.py"
+            ],
+            "transport": "stdio"
+        }
+    }
+}

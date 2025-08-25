@@ -2,7 +2,7 @@ import argparse
 import os
 from mcp.client.stdio import stdio_client, StdioServerParameters
 from mcp.client.session import ClientSession
-from modules.pipeline import DocumentProcessingPipeline
+from modules.pipeline_old import DocumentProcessingPipeline
 import asyncio
 from opentelemetry import trace
 from opentelemetry.sdk.trace import TracerProvider

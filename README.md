@@ -164,9 +164,9 @@ pdf-extraction-mcp/
 ├── 📁 modules/
 │   └── 📄 pipeline.py           # Main processing pipeline
 ├── 📁 server/                   # MCP microservices
-│   ├── 📄 pdf_extractor.py      # PDF text extraction
+│   ├── 📄      
 │   ├── 📄 pdf_processing_server.py  # Processing & embedding
-│   ├── 📄 vector_store.py       # Vector storage class
+│   ├── 📄     
 │   └── 📄 summarizer_qna_server.py  # Summarization & Q&A
 └── 📁 tests/                    # Unit tests (if any)
 ```

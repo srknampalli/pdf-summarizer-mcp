@@ -1,198 +1,326 @@
-import streamlit as st
-from modules.pipeline import DocumentProcessingPipeline
-import tempfile
+
 import os
-import time
-import hashlib
+from phoenix.otel import register
+
+PHOENIX_ENDPOINT = "https://agentopsacc-backend-app.yellowriver-a22b4385.westus.azurecontainerapps.io/v1/traces"
+API_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJqdGkiOiJBcGlLZXk6OSJ9.DF1jhTBxOcI7cfrL84JE82PHtymsypKCUZ5gUlI0BtY"
 
 
-from modules.tracing_setup import setup_otel_langchain_tracing, get_phoenix_dashboard_url, check_environment_setup
-
-
-env_check = check_environment_setup()
-
-# Initialize tracing
-tracing_enabled = setup_otel_langchain_tracing() if env_check else False
-
-st.set_page_config(
-    page_title="PDF QnA & Summarizer", 
-    page_icon="📄",
-    layout="wide"
+os.environ["PHOENIX_COLLECTOR_ENDPOINT"] = PHOENIX_ENDPOINT
+tracer_provider = register(
+    project_name="pdf-assistant-streamlit",
+    endpoint=PHOENIX_ENDPOINT,
+    auto_instrument=True,
+    batch=True,
+    headers={
+        "api-key": API_KEY,
+        "authorization": f"Bearer {API_KEY}"
+    }
 )
 
-st.title("📄 PDF QnA & Summarizer")
+from openinference.instrumentation.langchain import LangChainInstrumentor
+LangChainInstrumentor().instrument(tracer_provider=tracer_provider)
 
-# Simple tracing status
-if tracing_enabled:
-    st.success("🔍 OpenTelemetry LangChain tracing active")
-else:
-    st.warning("⚠️ Tracing disabled")
+import streamlit as st
+st.set_page_config(
+    page_title="📄 PDF RAG System",
+    page_icon="🤖",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
 
-# Initialize session state
-if 'chat_history' not in st.session_state:
-    st.session_state.chat_history = []
+def initialize_session_state():
+    if "orchestrator" not in st.session_state:
+        from modules.rag_orchestrator import HybridOrchestrator
+        st.session_state.orchestrator = HybridOrchestrator()
+    if "doc_id" not in st.session_state:
+        st.session_state.doc_id = None
+    if "chat_history" not in st.session_state:
+        st.session_state.chat_history = []
 
-# Create main layout
-col1, col2 = st.columns([2, 1])
+initialize_session_state()
 
-with col1:
-    st.header("📤 Document Processing")
-    
-    uploaded_file = st.file_uploader("Upload a PDF", type=["pdf"])
+import asyncio
+import tempfile
+import os
 
-    if uploaded_file is not None:
-        # Document caching
-        file_content = uploaded_file.read()
-        file_hash = hashlib.md5(file_content).hexdigest()
-        uploaded_file.seek(0)
-        
+async def display_streaming_response(response_generator):
+    """Stream agent responses to UI"""
+    full_response = ""
+    placeholder = st.empty()
+    async for chunk in response_generator:
+        full_response += chunk
+        placeholder.markdown(full_response)
+    return full_response
+
+def process_pdf_upload():
+    """Handles PDF file upload and ingestion"""
+    uploaded_file = st.file_uploader("📄 Choose a PDF", type=["pdf"])
+    if st.button("🔄 Process PDF", use_container_width=True, type="primary") and uploaded_file:
         with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
-            tmp.write(file_content)
+            tmp.write(uploaded_file.read())
             pdf_path = tmp.name
 
-        # Check cache
-        if (st.session_state.get('file_hash') == file_hash and 
-            'pipeline' in st.session_state):
-            
-            st.info("✅ Using cached document")
-            pipeline = st.session_state.pipeline
-            
-        else:
-            # Process new document
-            with st.spinner("🔄 Processing PDF..."):
-                start_time = time.time()
-                pipeline = DocumentProcessingPipeline(pdf_path)
-                processing_time = time.time() - start_time
-                
-                # Store in session
-                st.session_state.pipeline = pipeline
-                st.session_state.file_hash = file_hash
-                st.session_state.chat_history = []
-                
-                st.success(f"✅ Processed in {processing_time:.2f}s")
-
-        # Summary Section
-        st.subheader("📝 Summary")
-        
-        if st.button("🔍 Get Summary", use_container_width=True):
-            with st.spinner("Generating summary..."):
-                start_time = time.time()
-                summary = pipeline.get_summary()
-                summary_time = time.time() - start_time
-            
-            st.session_state.last_summary = summary
-            st.session_state.summary_time = summary_time
-        
-        # Display summary
-        if hasattr(st.session_state, 'last_summary'):
-            if st.session_state.last_summary.startswith(('⚠️', '❌')):
-                st.warning(st.session_state.last_summary)
+        with st.spinner("Processing PDF..."):
+            result = asyncio.run(st.session_state.orchestrator.ingest_pdf(pdf_path))
+            if result.get("success"):
+                st.session_state.doc_id = result["doc_id"]
+                st.success("✅ PDF processed successfully!")
             else:
-                st.write(st.session_state.last_summary)
-            st.caption(f"Generated in {st.session_state.summary_time:.2f}s")
+                st.error(f"❌ Failed: {result.get('error')}")
 
-        # Q&A Section
-        st.subheader("❓ Questions")
-        
-        col_q1, col_q2 = st.columns([3, 1])
-        with col_q1:
-            question = st.text_input("Ask a question:", key="question_input")
-        with col_q2:
-            top_k = st.number_input("Top K", min_value=1, max_value=50, value=5)
-        
-        if st.button("🚀 Ask", use_container_width=True) and question:
-            with st.spinner("Getting answer..."):
-                start_time = time.time()
-                answer = pipeline.ask_question(question, top_k=top_k)
-                qa_time = time.time() - start_time
-            
-            st.session_state.chat_history.append({
-                'question': question,
-                'answer': answer, 
-                'time': qa_time,
-                'timestamp': time.strftime("%H:%M:%S")
-            })
+        os.unlink(pdf_path)
 
-        # Chat History
-        if st.session_state.chat_history:
-            st.subheader("💬 History")
-            
-            for i, chat in enumerate(reversed(st.session_state.chat_history)):
-                with st.expander(f"Q{len(st.session_state.chat_history)-i}: {chat['question'][:40]}... ({chat['time']:.1f}s)"):
-                    st.markdown(f"**Q:** {chat['question']}")
-                    
-                    if chat['answer'].startswith(('⚠️', '❌')):
-                        st.warning(chat['answer'])
-                    else:
-                        st.markdown(f"**A:** {chat['answer']}")
-                    
-                    st.caption(f"{chat['time']:.2f}s • {chat['timestamp']}")
-    else:
-        st.info("📋 Upload a PDF to get started")
+def ask_question_ui():
+    """Handles asking questions about the document or general queries"""
+    question = st.text_input("💬 Ask a question")
+    if st.button("🔍 Get Answer", use_container_width=True) and question:
+        with st.spinner("Thinking..."):
+            response_gen = st.session_state.orchestrator.process_query(
+                question, st.session_state.doc_id
+            )
+            answer = asyncio.run(display_streaming_response(response_gen))
+            st.session_state.chat_history.append({"question": question, "answer": answer})
 
-# Lightweight sidebar
-with col2:
-    st.header("📊 Stats")
-    
-    if 'pipeline' in st.session_state:
-        st.metric("📄 Document", st.session_state.pipeline.doc_id[:15] + "...")
-        st.metric("💬 Questions", len(st.session_state.chat_history))
-        
-        if st.session_state.chat_history:
-            avg_time = sum(c['time'] for c in st.session_state.chat_history) / len(st.session_state.chat_history)
-            st.metric("⚡ Avg Time", f"{avg_time:.2f}s")
+def show_chat_history():
+    """Displays chat history in collapsible sections"""
+    if st.session_state.chat_history:
+        st.subheader("📜 Chat History")
+        for chat in reversed(st.session_state.chat_history):
+            with st.expander(f"💬 {chat['question']}"):
+                st.markdown(f"**Q:** {chat['question']}")
+                st.markdown(f"**A:** {chat['answer']}")
+
+
+def main():
+    st.title("🤖 PDF RAG System")
+
+    st.subheader("1️⃣ Upload and Process PDF")
+    process_pdf_upload()
+
+    if st.session_state.doc_id:
+        st.success(f"📄 Current Document ID: {st.session_state.doc_id}")
     else:
-        st.info("No document loaded")
-    
-    st.markdown("---")
-    
-    # Phoenix Dashboard link (simple)
-    if tracing_enabled:
-        st.subheader("🔍 Phoenix DB")
-        dashboard_url = get_phoenix_dashboard_url()
-        
-        if dashboard_url:
-            if st.button("🔗 Open Dashboard", use_container_width=True):
-                st.markdown(f'<a href="{dashboard_url}" target="_blank">Open Phoenix</a>', unsafe_allow_html=True)
-            
-            st.caption("All LLM calls traced automatically")
-        else:
-            st.info("Dashboard URL not available")
-    else:
-        st.subheader("⚠️ Tracing Setup")
-        st.warning("Environment variables not set")
-        st.info("""
-        
-        ```
-         restart Streamlit.
-        """)
-    
-    # Document management
-    st.markdown("---")
-    st.subheader("🛠️ Actions")
-    
-    if 'pipeline' in st.session_state:
-        if st.button("🗑️ Clear", use_container_width=True):
-            for key in ['pipeline', 'file_hash', 'chat_history', 'last_summary']:
-                if key in st.session_state:
-                    del st.session_state[key]
+        st.info("No document loaded yet.")
+
+    # Ask questions
+    if st.session_state.doc_id:
+        st.subheader("2️⃣ Ask Questions")
+        ask_question_ui()
+
+    # Show chat history
+    show_chat_history()
+
+    # Sidebar
+    with st.sidebar:
+        st.header("ℹ️ System Info")
+        st.metric("Document", "Loaded" if st.session_state.doc_id else "None")
+        st.metric("Questions", len(st.session_state.chat_history))
+        st.markdown("---")
+        if st.button("🗑️ Clear History", use_container_width=True):
+            st.session_state.chat_history = []
+            st.rerun()
+        if st.button("🔄 Reset All", use_container_width=True):
+            st.session_state.clear()
             st.rerun()
 
-# Simple footer
-st.markdown("---")
-col_f1, col_f2, col_f3 = st.columns(3)
 
-with col_f1:
-    st.metric("🔍 Tracing", "Active" if tracing_enabled else "Off")
+if __name__ == "__main__":
+    main()
 
-with col_f2:
-    if 'pipeline' in st.session_state:
-        st.metric("📚 Status", "Loaded")
-    else:
-        st.metric("📚 Status", "Empty")
 
-with col_f3:
-    chat_count = len(st.session_state.chat_history)
-    st.metric("💬 Total", chat_count)
+
+
+
+# import streamlit as st
+# import asyncio
+# import tempfile
+# import os
+# from modules.rag_orchestrator import HybridOrchestrator
+
+# import nest_asyncio
+# nest_asyncio.apply()
+
+
+
+# from phoenix.otel import register
+# tracer_provider = register(
+#     project_name="pdf-assistant-streamlit", 
+#     endpoint="https://agentopsacc-backend-app.yellowriver-a22b4385.westus.azurecontainerapps.io/v1/traces",
+#     auto_instrument=True,
+#     headers={
+#         "api-key": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJqdGkiOiJBcGlLZXk6OSJ9.DF1jhTBxOcI7cfrL84JE82PHtymsypKCUZ5gUlI0BtY",
+#         "authorization": "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJqdGkiOiJBcGlLZXk6OSJ9.DF1jhTBxOcI7cfrL84JE82PHtymsypKCUZ5gUlI0BtY"
+#     }
+# )
+
+
+# from openinference.instrumentation.langchain import LangChainInstrumentor
+# instrumentor = LangChainInstrumentor()
+# instrumentor.instrument(tracer_provider=tracer_provider)
+
+# tracer = tracer_provider.get_tracer("langgraph_agent")
+
+# st.title("🤖 PDF RAG System")
+
+# # Initialize orchestrator
+# if 'orchestrator' not in st.session_state:
+#     st.session_state.orchestrator = HybridOrchestrator()
+
+# if 'doc_id' not in st.session_state:
+#     st.session_state.doc_id = ""
+
+# if 'chat_history' not in st.session_state:
+#     st.session_state.chat_history = []
+
+
+# async def display_streaming_response(response_generator):
+#     full_response = ""
+#     placeholder = st.empty()
+#     async for chunk in response_generator:
+#         full_response += chunk
+#         placeholder.markdown(full_response)
+#     return full_response
+
+
+# st.subheader("📄 Upload PDF")
+# uploaded_file = st.file_uploader("Choose a PDF file", type=["pdf"])
+
+# if st.button("🔄 Process PDF", use_container_width=True, type="primary") and uploaded_file:
+#     with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+#         tmp.write(uploaded_file.read())
+#         pdf_path = tmp.name
+    
+#     with st.spinner("Processing PDF..."):
+#         result = asyncio.run(st.session_state.orchestrator.ingest_pdf(pdf_path))
+        
+#         if result.get("success"):
+#             st.session_state.doc_id = result["doc_id"]
+#             st.success(f"✅ PDF processed successfully!")
+#             st.info(f"Document ID: **{result['doc_id']}**")
+#         else:
+#             st.error(f"❌ Failed: {result.get('error')}")
+    
+#     os.unlink(pdf_path)
+
+
+# if st.session_state.doc_id:
+#     st.success(f"📄 **Current Document:** {st.session_state.doc_id}")
+# else:
+#     st.info("📄 No document loaded. Please upload and process a PDF first.")
+
+# # Main interaction area
+# st.subheader("💬 Ask Questions")
+
+# if st.session_state.doc_id:
+#     col1, col2 = st.columns(2)
+    
+#     with col1:
+#         if st.button("📋 Summarize Document", use_container_width=True, type="secondary"):
+#             with st.spinner("Generating summary..."):
+#                 async def get_summary():
+#                     response_gen = st.session_state.orchestrator.process_query(
+#                         "Please provide a comprehensive summary of this document including main topics, key findings, and important insights.", 
+#                         st.session_state.doc_id
+#                     )
+#                     return await display_streaming_response(response_gen)
+                
+#                 summary = asyncio.run(get_summary())
+#                 st.session_state.chat_history.append({
+#                     'question': 'Document Summary', 
+#                     'answer': summary
+#                 })
+    
+#     with col2:
+#         if st.button("🌤️ Get Weather", use_container_width=True):
+#             with st.spinner("Getting weather..."):
+#                 async def get_weather():
+#                     response_gen = st.session_state.orchestrator.process_query(
+#                         "What's the weather like in Chennai?", 
+#                         None
+#                     )
+#                     return await display_streaming_response(response_gen)
+                
+#                 weather = asyncio.run(get_weather())
+#                 st.session_state.chat_history.append({
+#                     'question': 'Weather in Chennai', 
+#                     'answer': weather
+#                 })
+
+# question = st.text_input(
+#     "Ask any question:", 
+#     placeholder="Ask about the document, weather, or general topics..."
+# )
+
+# if st.button("🔍 Ask Question", use_container_width=True) and question:
+#     with st.spinner("Getting answer..."):
+#         doc_related_keywords = ['document', 'pdf', 'text', 'content', 'paper', 'article', 'findings', 'research', 'study', 'report']
+#         weather_keywords = ['weather', 'temperature', 'forecast', 'climate', 'rain', 'sunny', 'cloudy']
+        
+#         question_lower = question.lower()
+        
+#         async def get_answer():
+#             if st.session_state.doc_id and any(keyword in question_lower for keyword in doc_related_keywords):
+
+#                 response_gen = st.session_state.orchestrator.process_query(question, st.session_state.doc_id)
+#             elif any(keyword in question_lower for keyword in weather_keywords):
+       
+#                 response_gen = st.session_state.orchestrator.process_query(question, None)
+#             elif st.session_state.doc_id:
+
+#                 response_gen = st.session_state.orchestrator.process_query(question, st.session_state.doc_id)
+#             else:
+
+#                 response_gen = st.session_state.orchestrator.process_query(question, None)
+            
+#             return await display_streaming_response(response_gen)
+        
+#         answer = asyncio.run(get_answer())
+#         st.session_state.chat_history.append({
+#             'question': question, 
+#             'answer': answer
+#         })
+
+# # Chat History
+# if st.session_state.chat_history:
+#     st.subheader("📜 Chat History")
+    
+#     for i, chat in enumerate(reversed(st.session_state.chat_history)):
+#         with st.expander(f"💬 {chat['question'][:60]}..."):
+#             st.markdown(f"**Q:** {chat['question']}")
+#             st.markdown(f"**A:** {chat['answer']}")
+
+# # Sidebar
+# with st.sidebar:
+#     st.header("ℹ️ System Info")
+    
+#     if st.session_state.doc_id:
+#         st.metric("📄 Document", "Loaded")
+#         st.metric("💬 Questions", len(st.session_state.chat_history))
+#     else:
+#         st.metric("📄 Document", "None")
+    
+#     st.markdown("---")
+    
+#     if st.button("🗑️ Clear History", use_container_width=True):
+#         st.session_state.chat_history = []
+#         st.rerun()
+    
+#     if st.button("🔄 Reset All", use_container_width=True):
+#         st.session_state.clear()
+#         st.rerun()
+    
+#     st.markdown("---")
+#     st.markdown("**💡 Tips:**")
+  
+
+
+
+
+
+
+
+
+
 
 
